@@ -6,6 +6,8 @@ __pycache__/
 # C extensions
 *.so
 
+sandbox.py
+
 # data files/directories should not be uploaded
 images/
 data/
