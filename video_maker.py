@@ -3,6 +3,7 @@ import cv2
 from sorter import Sorter
 from detect_landmarks import FaceLandmarkDetector
 from warp_image import ImageWarper
+from face_detector import rotate_image
 import extrapolate_vector_field as evf
 
 
@@ -10,23 +11,46 @@ import extrapolate_vector_field as evf
 # return a new list of these faces, where each has been transformed
 # the transformation performs the following steps in order:
 ### rotation, so that eyes in each image is horizontal
-### resizing, so that all images have the same resolution
 ### scaling warp, so that the two eyes have the same distance in each face
 ### translation, so that the eyes are aligned in all images
 def align_faces(faces):
     results = [None for _ in faces]
-    # resize all images so that they are 800*800
+    d = FaceLandmarkDetector()
     for i in range(len(faces)):
-        face = faces[i]
-        img = face[1]
-        h, w, cc = img.shape
-        sf = 800 / max(h, w)
-        hh, ww = int(h * sf), int(w * sf)
-        img = cv2.resize(img, (ww, hh))
-        results[i] = np.full((800, 800, cc), (0,0,0), dtype=np.uint8)
-        xx = (800 - ww) // 2
-        yy = (800 - hh) // 2
-        results[i][yy:yy+hh, xx:xx+ww] = img
+        img = faces[i][1]
+        cc = img.shape[2]
+        # step 1: rotate the image (without downsizing it) to make the eyes horizontal
+        landmarks = d.predict(img)
+        eye1 = landmarks[36]
+        eye2 = landmarks[45]
+        angle = np.arctan((eye1[1]-eye2[1]) / (eye1[0]-eye2[0]))
+        img_r = rotate_image(img, scaleFactor=1, degreesCCW=angle * 180 / np.pi)
+        # step 2: scale the image so that the two eyes' distance is the target distance (200)
+        eye_dist = np.linalg.norm(eye1 - eye2)
+        sf = 200 / eye_dist
+        img_rs = cv2.resize(img_r, None, fx=sf, fy=sf)
+        # step 3: crop out/pad a 800*800 region with the eyes at the center
+        oldY, oldX = img.shape[:2]
+        newY, newX = img_r.shape[:2]
+        Mr = cv2.getRotationMatrix2D(center=(oldX/2, oldY/2), angle=angle * 180 / np.pi, scale=1)
+        Mt = np.float32([[1, 0, 0.5*(newX-oldX)], [0, 1, 0.5*(newY-oldY)]])
+        eye1rs = np.matmul(Mt, np.append(np.matmul(Mr, np.append(eye1, 1)), 1)) * sf
+        eye2rs = np.matmul(Mt, np.append(np.matmul(Mr, np.append(eye2, 1)), 1)) * sf
+        eye_center = 0.5 * (eye1rs + eye2rs)
+        ex = int(eye_center[0])
+        ey = int(eye_center[1])
+        minx = ex - 400
+        maxx = minx + 800
+        miny = ey - 300
+        maxy = miny + 800
+        dy, dx = img_rs.shape[:2]
+        hh = min(maxy, dy) - max(miny, 0)
+        ww = min(maxx, dx) - max(minx, 0)
+        hs = max(-miny, 0)
+        ws = max(-minx, 0)
+        result = np.full((800, 800, cc), (0,0,0), dtype=np.uint8)
+        result[hs:hs+hh, ws:ws+ww] = img_rs[max(miny, 0):min(maxy, dy), max(minx, 0):min(maxx, dx)]
+        results[i] = result
     return results
 
 
@@ -60,11 +84,11 @@ def make_video(faces, out_filename, interval=1, pause=0.5, fps=30):
         face2_dy = landmarks2[:, 1] - landmarks1[:, 1]
         face2_fx, face2_fy = e.extrapolate(face2_x, face2_y, face2_dx, face2_dy, (800,800))
         # first put original face1 into the video for duration "pause"
-        for i in range(int(pause * fps)):
+        for j in range(int(pause * fps)):
             out.write(face1)
         # then produce the warped sequence
         warp_amounts = np.linspace(0., 1., int(interval * fps))
-        for i, warp_amount in enumerate(warp_amounts):
+        for j, warp_amount in enumerate(warp_amounts):
             face1_warped = w.warp(face1, face1_fx, face1_fy, warp_amount)
             face2_warped = w.warp(face2, face2_fx, face2_fy, 1 - warp_amount)
             # We alpha blend the original images
@@ -77,6 +101,16 @@ def make_video(faces, out_filename, interval=1, pause=0.5, fps=30):
     out.release()
 
 
+# a much simpler version of the video maker that doesn't perform the morphing operations
+def make_video_nomorph(faces, out_filename, pause=1, fps=30):
+    out = cv2.VideoWriter(out_filename, cv2.VideoWriter_fourcc(*'mp4v'), fps, (800, 800))
+    for i in range(len(faces)):
+        for j in range(int(pause * fps)):
+            out.write(faces[i])
+    out.release()
+
+
+
 if __name__ == "__main__":
     path = "./images/set3/"
     sorter = Sorter(path)
@@ -84,4 +118,5 @@ if __name__ == "__main__":
     facelist = sorter.list_all()
     facelist = align_faces(facelist)
     make_video(facelist, "./data/out.mp4")
+    make_video_nomorph(facelist, "./data/out_nomorph.mp4")
 
